@@ -1,16 +1,20 @@
-// 网飞猫 iOS 去广告 / 去不良信息 hook — v2
-// 机制：进程内注册 NSURLProtocol，拦 *.capi 请求，按路径分三类：
-//   1) /config/uniq*  → 返回空壳，广告位拿不到配置（开屏 / 暂停 / 信息流广告位）
-//   2) vod/detail/channel/search 等数据接口 → 若是明文 JSON：
-//        · 丢掉 isAdult==true 或标题/分类命中成人词的条目
-//        · 删掉 bannerAD / startAD / pauseAD / adList 等广告字段
-//        · banner 轮播改图（只改 image 字段，不增删结构，避免 App 解不出数据）
-//   3) 其余 → 原样放行（只打日志）
-// 设计前提：结构不认识就什么都不做——宁可没去成广告，也不能让 App 解析失败。
+// 网飞猫 iOS 去广告 / 去不良信息 / 品牌化 hook — v3
+// 拦截：*.capi 与 /user/* 请求
+//   1) /config/uniq*   → 空壳（开屏 / 暂停 / 信息流广告位全失效）
+//   2) 数据接口 → 明文 JSON 时：
+//        · 丢成人条目（isAdult / 标题或分类命中成人词）
+//        · 删 bannerAD / startAD / pauseAD / adList 等广告字段
+//        · banner 轮播改图
+//   3) /user/* 与其它 → 放行；若 JSON 里带 nickname/avatar/signature 就改成本地品牌值
+// 容错原则：解不出 JSON / 结构不认识 → 原样返回，绝不让 App 解码失败。
 #import <Foundation/Foundation.h>
 
 static NSString *const kBannerURL =
     @"https://cdn.jsdelivr.net/gh/CN-Miaos/Miaos.github.io@master/ncat/banner.jpg";
+static NSString *const kAvatarURL =
+    @"https://cdn.jsdelivr.net/gh/CN-Miaos/Miaos.github.io@master/ncat/avatar.png";
+static NSString *const kNickname = @"Miaos喵神";
+static NSString *const kSignature = @"永久SVIP · 做点好东西";
 static NSString *const kHandled = @"NoadHandledKey";
 
 static NSArray<NSString *> *adultWords(void) {
@@ -55,13 +59,29 @@ static BOOL hasTitle(NSDictionary *item) {
     return NO;
 }
 
+// 用户资料：只有「同时带 nickname 和 avatar/signature」的对象才认作资料卡，避免误伤签名字段
+static void spoofProfile(NSMutableDictionary *d) {
+    BOOL hasNick = [d[@"nickname"] isKindOfClass:[NSString class]] || [d[@"user_nickname"] isKindOfClass:[NSString class]];
+    BOOL hasAva  = [d[@"avatar"] isKindOfClass:[NSString class]] || [d[@"user_avatar"] isKindOfClass:[NSString class]];
+    BOOL hasSig  = [d[@"signature"] isKindOfClass:[NSString class]];
+    if (!hasNick && !hasAva) return;
+    for (NSString *k in @[ @"nickname", @"user_nickname" ])
+        if (d[k]) d[k] = kNickname;
+    for (NSString *k in @[ @"avatar", @"user_avatar" ])
+        if (d[k]) d[k] = kAvatarURL;
+    if (hasNick && hasSig) {
+        for (NSString *k in @[ @"signature", @"signatureText", @"intro" ])
+            if (d[k]) d[k] = kSignature;
+    }
+}
+
 static id scrub(id obj) {
     if ([obj isKindOfClass:[NSArray class]]) {
         NSMutableArray *out = [NSMutableArray arrayWithCapacity:[obj count]];
         for (id e in (NSArray *)obj) {
             if ([e isKindOfClass:[NSDictionary class]]) {
                 NSDictionary *d = (NSDictionary *)e;
-                if (hasTitle(d) && looksAdult(d)) continue;      // 丢成人条目
+                if (hasTitle(d) && looksAdult(d)) continue;
                 [out addObject:scrub(d)];
             } else {
                 id s = scrub(e);
@@ -73,7 +93,7 @@ static id scrub(id obj) {
     if ([obj isKindOfClass:[NSDictionary class]]) {
         NSMutableDictionary *out = [NSMutableDictionary dictionary];
         for (NSString *k in (NSDictionary *)obj) {
-            if ([dropKeys() containsObject:k]) continue;          // 删广告字段
+            if ([dropKeys() containsObject:k]) continue;
             id v = scrub(((NSDictionary *)obj)[k]);
             if (v) out[k] = v;
         }
@@ -89,6 +109,7 @@ static id scrub(id obj) {
             for (NSString *lk in @[ @"url", @"link", @"jumpUrl", @"target" ]) if (b[lk]) b[lk] = @"";
             out[bk] = @[ b ];
         }
+        spoofProfile(out);
         return out;
     }
     return obj;
@@ -98,7 +119,7 @@ static NSData *scrubJSON(NSData *data) {
     if (!data.length) return data;
     id json = [NSJSONSerialization JSONObjectWithData:data
                                               options:NSJSONReadingMutableContainers error:NULL];
-    if (!json) return data;                                       // 密文/非 JSON：原样交回
+    if (!json) return data;
     id clean = scrub(json);
     NSData *out = [NSJSONSerialization dataWithJSONObject:clean options:0 error:NULL];
     return out.length ? out : data;
@@ -111,9 +132,11 @@ static NSData *scrubJSON(NSData *data) {
 
 + (BOOL)canInitWithRequest:(NSURLRequest *)request {
     NSString *u = request.URL.absoluteString ?: @"";
-    if ([u rangeOfString:@".capi"].location == NSNotFound) return NO;
     if ([NSURLProtocol propertyForKey:kHandled inRequest:request]) return NO;
-    return YES;
+    if ([u rangeOfString:@".capi"].location != NSNotFound) return YES;
+    NSString *p = request.URL.path ?: @"";
+    if ([p hasPrefix:@"/user"]) return YES;      // 账号/资料接口
+    return NO;
 }
 
 + (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request { return request; }
@@ -123,7 +146,6 @@ static NSData *scrubJSON(NSData *data) {
     [NSURLProtocol setProperty:@YES forKey:kHandled inRequest:req];
     NSString *path = req.URL.path ?: @"";
 
-    // 1) 广告位配置：空壳。appInit 等启动配置必须放行，否则 App 起不来
     if ([path rangeOfString:@"config/uniq"].location != NSNotFound) {
         NSData *body = [@"{\"code\":0,\"msg\":\"ok\",\"data\":{}}" dataUsingEncoding:NSUTF8StringEncoding];
         NSHTTPURLResponse *resp = [[NSHTTPURLResponse alloc]
@@ -138,15 +160,12 @@ static NSData *scrubJSON(NSData *data) {
     }
 
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
-    cfg.protocolClasses = @[];   // 防递归
+    cfg.protocolClasses = @[];
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
     [[session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         if (err) { [self.client URLProtocol:self didFailWithError:err]; return; }
 
-        BOOL isDataAPI = ([path rangeOfString:@"vod/"].location != NSNotFound ||
-                          [path rangeOfString:@"channel/"].location != NSNotFound ||
-                          [path rangeOfString:@"search"].location != NSNotFound);
-        NSData *out = isDataAPI ? scrubJSON(data) : data;
+        NSData *out = scrubJSON(data);
 
         NSHTTPURLResponse *hr = [resp isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)resp : nil;
         NSMutableDictionary *h = [hr.allHeaderFields mutableCopy] ?: [NSMutableDictionary dictionary];
@@ -177,5 +196,5 @@ static NSData *scrubJSON(NSData *data) {
 
 __attribute__((constructor)) static void noad_init(void) {
     [NSURLProtocol registerClass:[NoadProtocol class]];
-    NSLog(@"[noad] dylib loaded v2, NSURLProtocol registered");
+    NSLog(@"[noad] dylib loaded v3, NSURLProtocol registered");
 }
