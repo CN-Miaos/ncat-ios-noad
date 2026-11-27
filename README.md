@@ -16,3 +16,10 @@ clang -target arm64-apple-ios14.0 -isysroot "$SDK" -fobjc-arc -dynamiclib \
       -o libnoad.dylib hook/noad.m
 python3 tool.py inject work libnoad.dylib && python3 tool.py check work && python3 tool.py pack work out.ipa
 ```
+
+## 关于 CI（实测结论）
+
+`runs-on: macos-13/14` 在**私有仓 + 免费账号**下会一直排队不动（免费额度不含 macOS 分钟）。
+二选一：仓库转 public（免费 macOS runner），或账号升级 Pro（$4/月含 macOS 分钟）。
+即使跑起来，Actions 也只能做「编译 dylib / 注入 / 签名 / 静态校验」——
+这个 IPA 是 arm64 设备二进制，没有 IOSSIMULATOR slice，模拟器跑不了，行为只能真机验。

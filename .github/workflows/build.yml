@@ -1,9 +1,7 @@
 name: build-noad-ipa
 
 on:
-  workflow_dispatch:
-  push:
-    branches: [main]
+  workflow_dispatch:   # 只手动触发：私有仓免费账号拿不到 macOS runner，push 触发会一直排队
 
 env:
   BASE_IPA: https://dl.ncat33.com/target/ipa/kkys-116.ipa
