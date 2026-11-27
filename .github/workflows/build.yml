@@ -11,7 +11,7 @@ env:
 jobs:
   # ① 钩子逻辑自测：macOS 跑同一份 noad.m，验证拦截/放行分支（不需要 iPhone）
   logic-test:
-    runs-on: macos-14
+    runs-on: macos-13
     steps:
       - uses: actions/checkout@v4
       - name: 编译并运行钩子自测
@@ -22,7 +22,7 @@ jobs:
 
   # ② 真机包构建：iOS SDK 编译 dylib → 注入 → ad-hoc 签名 → 校验 → 出包
   build-ipa:
-    runs-on: macos-14
+    runs-on: macos-13
     needs: logic-test
     steps:
       - uses: actions/checkout@v4
