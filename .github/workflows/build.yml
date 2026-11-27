@@ -1,0 +1,68 @@
+name: build-noad-ipa
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  BASE_IPA: https://dl.ncat33.com/target/ipa/kkys-116.ipa
+
+jobs:
+  # ① 钩子逻辑自测：macOS 跑同一份 noad.m，验证拦截/放行分支（不需要 iPhone）
+  logic-test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: 编译并运行钩子自测
+        run: |
+          clang -fobjc-arc -O1 -framework Foundation \
+            hook/noad.m tests/test_hook.m -o test_hook
+          ./test_hook
+
+  # ② 真机包构建：iOS SDK 编译 dylib → 注入 → ad-hoc 签名 → 校验 → 出包
+  build-ipa:
+    runs-on: macos-14
+    needs: logic-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载官方 IPA
+        run: curl -sSL -o base.ipa "$BASE_IPA" && ls -la base.ipa
+
+      - name: 解包 + 静态补丁
+        run: |
+          python3 tool.py unpack base.ipa work
+          python3 tool.py patch work
+
+      - name: 编译 iOS dylib
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          clang -target arm64-apple-ios14.0 -isysroot "$SDK" \
+                -fobjc-arc -dynamiclib -O2 \
+                -install_name @executable_path/Frameworks/libnoad.dylib \
+                -framework Foundation \
+                -o libnoad.dylib hook/noad.m
+          file libnoad.dylib
+
+      - name: 注入
+        run: python3 tool.py inject work libnoad.dylib
+
+      - name: ad-hoc 签名 + 严格校验
+        run: |
+          APP=$(ls -d work/Payload/*.app)
+          codesign -f -s - --deep --timestamp=none "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          echo "--- entitlements ---"
+          codesign -d --entitlements - "$APP" || true
+
+      - name: 结构自检 + 打包
+        run: |
+          python3 tool.py check work
+          python3 tool.py pack work ncat-noad.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ncat-noad-ipa
+          path: ncat-noad.ipa
+          retention-days: 14
