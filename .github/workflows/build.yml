@@ -39,7 +39,7 @@ jobs:
           clang -target arm64-apple-ios14.0 -isysroot "$SDK" \
                 -fobjc-arc -dynamiclib -O2 \
                 -install_name @executable_path/Frameworks/libnoad.dylib \
-                -framework Foundation \
+                -framework Foundation -framework UIKit \
                 -o libnoad.dylib hook/noad.m
           file libnoad.dylib
 
